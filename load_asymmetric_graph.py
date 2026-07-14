@@ -1,4 +1,16 @@
 """
+SOURCE ATTRIBUTION
+══════════════════
+[ISUMAP]  Joharinad & Jost, "IsUMap: Manifold Learning Leveraging
+          Vietoris-Rips Filtrations", AAAI 2025.
+            - Row-wise normalisation: D[i,j] = D_raw[i,j] / max_k(D_raw[i,k])
+            - Asymmetric distance matrix construction philosophy
+
+[OURS]    Adaptations for migration data:
+            - Log-ratio base distance: D_raw[i,j] = log(max+1) - log(F[i,j]+1)
+            - UN bilateral migration format (edges.csv) reader
+            - zero-both pair identification utilities
+
 load_asymmetric_graph.py
 ========================
 Loads the bilateral migration dataset (edges.csv) and converts it into
@@ -39,6 +51,7 @@ def load_migration_graph(
     year: int = 2015,
     gender: str = "total",
     log_transform: bool = True,
+    normalize: str = "isumap",
     verbose: bool = True,
 ) -> dict:
     """
@@ -49,7 +62,9 @@ def load_migration_graph(
     filepath     : path to edges.csv
     year         : migration year to use — one of {1990, 1995, 2000, 2005, 2010, 2015}
     gender       : "total" | "male" | "female"
-    log_transform: if True, apply log-ratio distance; else use 1/(flow+1) distances
+    log_transform: if True, log-ratio base distance (default); else linear
+    normalize    : "isumap" (default) — row-wise D[i,j]/max_k(D[i,k])
+                   "none"  — use D_raw directly
     verbose      : print summary statistics
 
     Returns
@@ -98,16 +113,26 @@ def load_migration_graph(
     # ── Convert flows to distances ─────────────────────────────────────────────
     max_flow = F.max()
 
+    # ── Base distance ─────────────────────────────────────────────────────────
     if log_transform:
-        # D[i,j] = log(max_flow + 1) − log(F[i,j] + 1)
-        # → 0 for highest flow, log(max_flow+1) for zero flow
+        # D_raw[i,j] = log(max_flow+1) - log(F[i,j]+1)  [OURS]
+        # Log-ratio: large flow → small distance. +1 avoids log(0).
+        # Zero flow gets max distance, max flow gets distance 0.
         log_max = np.log(max_flow + 1.0)
-        D_asym = log_max - np.log(F + 1.0)
+        D_raw = log_max - np.log(F + 1.0)
     else:
-        # Reciprocal distance: D[i,j] = 1 / (F[i,j] + 1)  (normalised)
-        D_asym = 1.0 / (F + 1.0)
-        # Re-scale so max distance = 1
-        D_asym /= D_asym.max()
+        # D_raw[i,j] = 1 - F[i,j] / max_flow
+        D_raw = 1.0 - F / max_flow
+    np.fill_diagonal(D_raw, 0.0)
+
+    # ── Normalization (Parvaneh's suggestion) ──────────────────────────────────
+    if normalize == "isumap":
+        # Row-wise: D[i,j] = D_raw[i,j] / max_k(D_raw[i,k])
+        # Each source i is scaled by its own farthest neighbour distance.
+        # Mirrors ISUMAP local metric D_ij/d_ik (Joharinad & Jost).  [ISUMAP]
+        D_asym = isumap_normalize(D_raw)
+    else:
+        D_asym = D_raw.copy()
 
     np.fill_diagonal(D_asym, 0.0)
 
@@ -122,6 +147,7 @@ def load_migration_graph(
         print(f"  Directed edges : {len(df)}")
         print(f"  Non-zero flows : {nonzero_flows}  ({100*nonzero_flows/n**2:.1f}% of all pairs)")
         print(f"  Max flow       : {int(max_flow):,}")
+        print(f"  Normalize      : {normalize}")
         print(f"  D_asym range   : [{D_asym.min():.3f}, {D_asym.max():.3f}]")
         print(f"  Mean |D−Dᵀ|    : {asym_gap.mean():.4f}  (asymmetry measure)")
         print(f"  Max  |D−Dᵀ|    : {asym_gap.max():.4f}")
@@ -171,3 +197,26 @@ def asymmetry_stats(D_asym: np.ndarray) -> dict:
         "max_asym":      np.abs(A[mask]).max(),
         "relative_asym": np.linalg.norm(A) / (np.linalg.norm(S) + 1e-12),
     }
+
+
+def isumap_normalize(D_raw: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """
+    Row-wise normalization: D[i,j] = D_raw[i,j] / max_k(D_raw[i,k])
+
+    For each source i, divide all distances by the maximum distance
+    from i to any other point (the farthest neighbour of i).
+    This mirrors the ISUMAP local metric: D[i,j] = d_ij / d_ik  [ISUMAP]
+    where x_k is the farthest neighbour of x_i.
+
+    Properties:
+      - D[i,j] in [0, 1] for all i, j
+      - D[i,i] = 0
+      - Asymmetric: D[i,j] != D[j,i] in general
+      - No global max_flow dominance
+    """
+    D = D_raw.copy()
+    np.fill_diagonal(D, 0.0)
+    row_max = D.max(axis=1, keepdims=True)           # (n, 1)
+    row_max = np.maximum(row_max, eps)               # avoid div by zero
+    return D / row_max
+
