@@ -49,9 +49,6 @@ import numpy as np
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Initialisation
-# Source: standard algebraic construction, used by DAGES as initialisation.
-#         We apply it to D_sym = ½(D+Dᵀ) because the input D_asym is
-#         asymmetric. [OURS: choice of D_sym for asymmetric input]
 # ─────────────────────────────────────────────────────────────────────────────
 def _cmds_init(D_sym: np.ndarray, d: int) -> np.ndarray:
     """Classical MDS initialisation from symmetric distance matrix."""
