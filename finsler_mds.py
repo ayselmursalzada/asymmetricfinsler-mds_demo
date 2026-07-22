@@ -42,13 +42,39 @@ Gradients:
   ∂L/∂yᵢ = source + target contributions     [DAGES — standard MDS grad]
 
 Randers validity: ‖bᵢ‖ ≤ 1 − δ              [DAGES constraint]
+
+Relationship to Randers geometry:
+  The general Randers metric is F(x,v) = α(x,v) + β(x,v), where α is a
+  position-dependent Riemannian metric and β is a position-dependent 1-form.
+
+  Dagès et al. use a canonical special case: α = global Euclidean norm,
+  β = ω·v with ω fixed and global (same drift for all points).
+
+  Our free-B model uses: α = global Euclidean norm, β = ⟨bᵢ, êᵢⱼ⟩ with
+  bᵢ per-node (different drift for each point, learned from data).
+
+  This generalises the canonical Randers embedding of Dagès et al. to a
+  discrete per-node Randers metric. Whether this constitutes a full
+  generalisation of the continuous Randers manifold is an open question
+  to be verified with the supervisor (Parvaneh Joharinad).
 """
 
 import numpy as np
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optimiser
+# Source: standard gradient-based optimiser.
+# Extended here to handle multiple parameter arrays [Y, B] simultaneously.
+# [OURS: multi-parameter extension to jointly update Y and B]
+# ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
 # Initialisation
+# Source: standard algebraic construction, used by DAGES as initialisation.
+#         We apply it to D_sym = ½(D+Dᵀ) because the input D_asym is
+#         asymmetric. [OURS: choice of D_sym for asymmetric input]
 # ─────────────────────────────────────────────────────────────────────────────
 def _cmds_init(D_sym: np.ndarray, d: int) -> np.ndarray:
     """Classical MDS initialisation from symmetric distance matrix."""
@@ -60,12 +86,6 @@ def _cmds_init(D_sym: np.ndarray, d: int) -> np.ndarray:
     return (vecs[:, idx] * np.sqrt(np.maximum(vals[idx], 0.0))).astype(np.float64)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Optimiser
-# Source: standard gradient-based optimiser.
-# Extended here to handle multiple parameter arrays [Y, B] simultaneously.
-# [OURS: multi-parameter extension to jointly update Y and B]
-# ─────────────────────────────────────────────────────────────────────────────
 class _Adam:
     def __init__(self, shapes, lr=1e-2, b1=0.9, b2=0.999, eps=1e-8):
         self.lr, self.b1, self.b2, self.eps = lr, b1, b2, eps
@@ -183,14 +203,14 @@ def finsler_mds_freeB(
     # Build float loss mask  [OURS]
     mask = pair_mask.astype(np.float64) if pair_mask is not None else 1.0 - np.eye(n)
 
-    # Initialise Y from cMDS on symmetric part  [OURS: use D_sym not D_asym]
-    # D_sym = ½(D+Dᵀ) gives a valid symmetric distance matrix for initialisation.
+    # Initialise Y via cMDS on D_sym = ½(D+Dᵀ)
     Y      = _cmds_init(0.5 * (D_asym + D_asym.T), d)
     Y_init = Y.copy()
 
     # Initialise B to zero  [OURS]
     # Unlike frozen-B where B=f(Y,D) at init, here B starts at zero and is
     # learned purely from the asymmetric residuals in the data.
+    # Zero init is natural: no prior knowledge about drift direction.
     B            = np.zeros((n, d)) if B_init is None else B_init.copy()
     B_init_saved = B.copy()
 
@@ -206,6 +226,40 @@ def finsler_mds_freeB(
         print(f"   pair_mask: {n_pairs}/{n*(n-1)} pairs ({n_pairs/n/(n-1)*100:.1f}%)")
         print(f"   lr={lr}  clip_delta={clip_delta}  max_epochs={n_epochs}")
 
+    # ── Training loop ────────────────────────────────────────────────────────
+    # Each epoch proceeds as follows:
+    #
+    # 1. FORWARD PASS
+    #    For every pair (i,j), compute the Randers distance:
+    #      êᵢⱼ     = (yⱼ − yᵢ) / ‖yⱼ − yᵢ‖       unit direction i→j
+    #      F̃(i→j) = ‖yⱼ − yᵢ‖ + ⟨bᵢ, êᵢⱼ⟩       Finsler distance
+    #      res[i,j] = (F̃(i→j) − D[i,j]) · mask[i,j]   residual (0 for excluded pairs)
+    #
+    # 2. LOSS
+    #      L = Σ res[i,j]²
+    #    Only observed pairs contribute (mask = 1 for zero-both excluded pairs).
+    #
+    # 3. GRADIENT w.r.t. Y[i]
+    #    Node i appears as SOURCE in pairs (i→j) and TARGET in pairs (j→i).
+    #    Source contribution:   2·Σⱼ res[i,j]·(−êᵢⱼ − perp_ij/r_ij)
+    #    Target contribution:   2·Σⱼ res[j,i]·(+êⱼᵢ + perp_ji/r_ij)
+    #    where perp_ij = bᵢ − ⟨bᵢ,êᵢⱼ⟩·êᵢⱼ  (component of bᵢ perpendicular to êᵢⱼ)
+    #    Because res[i,j] ≠ res[j,i] in general, Y[i] receives an asymmetric
+    #    gradient — the position learns directional information.
+    #
+    # 4. GRADIENT w.r.t. B[i]
+    #      ∂L/∂bᵢ = 2·Σⱼ res[i,j]·êᵢⱼ
+    #    If D[i,j] < D[j,i] (more flow i→j than reverse), res[i,j] > 0
+    #    on average → bᵢ is pushed toward êᵢⱼ → i→j becomes cheaper.
+    #    Over epochs, bᵢ converges to the direction of net outflow from i.
+    #
+    # 5. ADAM UPDATE  (Y and B simultaneously)
+    #      Y, B ← Adam.step([Y,B], [gY, gB])
+    #
+    # 6. RANDERS CLIPPING
+    #      ‖bᵢ‖ ← min(‖bᵢ‖, 1−δ)   for all i
+    #    Ensures positive-definiteness of the Randers metric at every step.
+    #
     for epoch in range(n_epochs):
 
         # Compute loss and gradients for both Y and B  [OURS: B included]
