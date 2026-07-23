@@ -97,11 +97,11 @@ class _Adam:
         self.t += 1
         out = []
         for i, (p, g) in enumerate(zip(params, grads)):
-            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * g
-            self.v[i] = self.b2 * self.v[i] + (1 - self.b2) * g ** 2
-            mh = self.m[i] / (1 - self.b1 ** self.t)
-            vh = self.v[i] / (1 - self.b2 ** self.t)
-            out.append(p - self.lr * mh / (np.sqrt(vh) + self.eps))
+            self.m[i] = self.b1 * self.m[i] + (1 - self.b1) * g                #Update biased first moment estimate
+            self.v[i] = self.b2 * self.v[i] + (1 - self.b2) * g ** 2           #Update biased second raw moment estimate
+            mh = self.m[i] / (1 - self.b1 ** self.t)                           #Compute bias-corrected first moment estimate
+            vh = self.v[i] / (1 - self.b2 ** self.t)                           #Compute bias-corrected first moment estimate
+            out.append(p - self.lr * mh / (np.sqrt(vh) + self.eps))            #Update parameters
         return out
 
 
